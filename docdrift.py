@@ -48,51 +48,64 @@ def extract_code_elements(source):
             elif isinstance(child, ast.Attribute):
                 code_tokens.extend(split_identifier(child.attr))
         elements.append({
-            "name": node.name, "type": "class" if isinstance(node, ast.ClassDef) else "function",
-            "lineno": node.lineno, "docstring": docstring, "code_tokens": code_tokens,
+            "name": node.name,
+            "type": "class" if isinstance(node, ast.ClassDef) else "function",
+            "docstring": docstring,
+            "code_tokens": code_tokens,
+            "args": [arg.arg for arg in node.args.args] if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else [],
         })
     return elements
 
 
-def extract_doc_sections(markdown):
-    """Extract heading-content pairs from markdown text."""
-    sections, heading, lines = [], None, []
-    for line in markdown.split('\n'):
-        m = re.match(r'^(#{1,6})\s+(.+)', line)
-        if m:
-            if heading is not None:
-                sections.append({"heading": heading, "content": '\n'.join(lines).strip()})
-            heading, lines = m.group(2).strip(), []
-        else:
-            lines.append(line)
-    if heading is not None:
-        sections.append({"heading": heading, "content": '\n'.join(lines).strip()})
-    return sections
+def extract_doc_sections(docstring):
+    """Extract semantic tokens from a docstring."""
+    if not docstring:
+        return []
+    return tokenize(docstring)
 
 
-def compute_drift(docstring_text, code_tokens):
-    """Compute drift score: 0.0=perfectly aligned, 1.0=fully drifted."""
-    doc_tokens = tokenize(docstring_text)
-    similarity = cosine_similarity(doc_tokens, code_tokens)
-    return round(1.0 - similarity, 4)
+def compute_drift(code_tokens, doc_tokens):
+    """Compute drift score between code and doc tokens.
+
+    Returns a float in [0.0, 1.0] where 0.0 means fully aligned
+    and 1.0 means completely drifted.
+    """
+    sim = cosine_similarity(code_tokens, doc_tokens)
+    return round(1.0 - sim, 4)
 
 
 def analyze(source, threshold=0.7):
-    """Analyze Python source code for doc-code cognitive drift."""
+    """Analyze a Python source string for doc-code drift.
+
+    Returns a list of report dicts with keys:
+        name, type, status, drift, message.
+    """
+    elements = extract_code_elements(source)
     reports = []
-    for elem in extract_code_elements(source):
-        if not elem["docstring"]:
+    for elem in elements:
+        name = elem["name"]
+        docstring = elem["docstring"]
+        code_tokens = elem["code_tokens"]
+        if not docstring:
             reports.append({
-                "name": elem["name"], "type": elem["type"], "line": elem["lineno"],
-                "drift": 1.0, "status": "missing_docs",
-                "message": f"No docstring for {elem['type']} '{elem['name']}'",
+                "name": name,
+                "type": elem["type"],
+                "status": "missing_docs",
+                "drift": 1.0,
+                "message": f"No docstring for {elem['type']} '{name}'",
             })
+            continue
+        doc_tokens = extract_doc_sections(docstring)
+        drift = compute_drift(code_tokens, doc_tokens)
+        if drift >= threshold:
+            status = "drifted"
         else:
-            drift = compute_drift(elem["docstring"], elem["code_tokens"])
-            status = "drifted" if drift >= threshold else "aligned"
-            reports.append({
-                "name": elem["name"], "type": elem["type"], "line": elem["lineno"],
-                "drift": drift, "status": status,
-                "message": f"{elem['type']} '{elem['name']}': drift={drift:.1%}",
-            })
+            status = "aligned"
+        reports.append({
+            "name": name,
+            "type": elem["type"],
+            "status": status,
+            "drift": drift,
+            "message": f"{elem['type']} '{name}': drift={drift:.1%}",
+        })
     return reports
